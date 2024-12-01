@@ -23,9 +23,19 @@ SetupIconFile=1.ico
 Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1; Check: not IsAdminInstallMode
-Name: "startup"; Description: "开机自动启动"; GroupDescription: "其他选项:"; Flags: unchecked
+Name: "startup"; Description: "开机自动启动"; GroupDescription: "其他选项:"
+
+[Code]
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = wpSelectTasks then
+  begin
+    WizardForm.TasksList.Checked[0] := True;  // Desktop icon
+    WizardForm.TasksList.Checked[2] := True;  // Startup
+  end;
+end;
 
 [Files]
 Source: "bin\Release\net6.0-windows\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
