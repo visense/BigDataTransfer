@@ -1,0 +1,11 @@
+serverAddr = "199.168.138.132"
+serverPort = 5443
+auth.token = "8ad3d1x429a2d"
+
+[[visitors]]
+name = "p2p_ssh_visitor"
+type = "xtcp"
+serverName = "p2p_ssh"
+secretKey = "abcdefg"
+bindAddr = "127.0.0.1"
+bindPort = 6222
