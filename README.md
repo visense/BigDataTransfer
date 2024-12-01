@@ -32,7 +32,7 @@
 
 1. 克隆仓库
 ```bash
-git clone https://github.com/YourUsername/BigDataTransfer.git
+git clone https://github.com/visense/BigDataTransfer.git
 ```
 
 2. 使用 Visual Studio 打开解决方案
@@ -66,4 +66,4 @@ dotnet build --configuration Release
 
 ## 作者
 
-[Your Name]
+[visense]
