@@ -412,6 +412,12 @@ namespace FRPCManager
                 new ColumnHeader { Text = "权限", Width = 80 },
                 new ColumnHeader { Text = "所有者", Width = 100 }
             });
+
+            // Enable drag and drop
+            localFileList.ItemDrag += LocalFileList_ItemDrag;
+            localFileList.DragEnter += FileList_DragEnter;
+            localFileList.DragDrop += LocalFileList_DragDrop;
+            localFileList.AllowDrop = true;
         }
 
         private void InitializeRemoteTreeView()
@@ -444,6 +450,12 @@ namespace FRPCManager
                 new ColumnHeader { Text = "权限", Width = 80 },
                 new ColumnHeader { Text = "所有者", Width = 100 }
             });
+
+            // Enable drag and drop
+            remoteFileList.ItemDrag += RemoteFileList_ItemDrag;
+            remoteFileList.DragEnter += FileList_DragEnter;
+            remoteFileList.DragDrop += RemoteFileList_DragDrop;
+            remoteFileList.AllowDrop = true;
         }
 
         private void PopulateLocalDirTree()
@@ -959,6 +971,113 @@ namespace FRPCManager
             }
         }
 
+        private string GetFullPath(TreeNode? node)
+        {
+            if (node == null)
+                return string.Empty;
+
+            var path = new Stack<string>();
+            var currentNode = node;
+            while (currentNode != null)
+            {
+                path.Push(currentNode.Text);
+                currentNode = currentNode.Parent;
+            }
+            return Path.Combine(path.ToArray());
+        }
+
+        private sealed class DragDropData
+        {
+            public required string SourcePath { get; init; }
+            public required bool IsLocal { get; init; }
+        }
+
+        private sealed class ProgressStream : Stream
+        {
+            private readonly Stream baseStream;
+            private readonly Action<int> onProgress;
+
+            public ProgressStream(Stream baseStream, Action<int> onProgress)
+            {
+                this.baseStream = baseStream ?? throw new ArgumentNullException(nameof(baseStream));
+                this.onProgress = onProgress ?? throw new ArgumentNullException(nameof(onProgress));
+            }
+
+            public override bool CanRead => baseStream.CanRead;
+            public override bool CanSeek => baseStream.CanSeek;
+            public override bool CanWrite => baseStream.CanWrite;
+            public override long Length => baseStream.Length;
+            public override long Position
+            {
+                get => baseStream.Position;
+                set => baseStream.Position = value;
+            }
+
+            public override void Flush() => baseStream.Flush();
+            public override long Seek(long offset, SeekOrigin origin) => baseStream.Seek(offset, origin);
+            public override void SetLength(long value) => baseStream.SetLength(value);
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                ArgumentNullException.ThrowIfNull(buffer);
+                int bytesRead = baseStream.Read(buffer, offset, count);
+                if (bytesRead > 0)
+                {
+                    onProgress(bytesRead);
+                }
+                return bytesRead;
+            }
+
+            public override void Write(byte[] buffer, int offset, int count)
+            {
+                ArgumentNullException.ThrowIfNull(buffer);
+                baseStream.Write(buffer, offset, count);
+                onProgress(count);
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                {
+                    baseStream.Dispose();
+                }
+                base.Dispose(disposing);
+            }
+        }
+
+        private void LocalFileList_ItemDrag(object? sender, ItemDragEventArgs e)
+        {
+            if (e.Item is not ListViewItem item)
+                return;
+
+            var dragData = new DragDropData
+            {
+                SourcePath = Path.Combine(GetFullPath(localDirTree.SelectedNode), item.Text),
+                IsLocal = true
+            };
+            localFileList.DoDragDrop(dragData, DragDropEffects.Copy);
+        }
+
+        private void RemoteFileList_ItemDrag(object? sender, ItemDragEventArgs e)
+        {
+            if (e.Item is not ListViewItem item || remoteTreeView.SelectedNode == null)
+                return;
+
+            var dragData = new DragDropData
+            {
+                SourcePath = Path.Combine(GetFullPath(remoteTreeView.SelectedNode), item.Text),
+                IsLocal = false
+            };
+            remoteFileList.DoDragDrop(dragData, DragDropEffects.Copy);
+        }
+
+        private void FileList_DragEnter(object? sender, DragEventArgs e)
+        {
+            e.Effect = e.Data?.GetDataPresent(typeof(DragDropData)) == true 
+                ? DragDropEffects.Copy 
+                : DragDropEffects.None;
+        }
+
         private void LocalDirTree_AfterSelect(object? sender, TreeViewEventArgs e)
         {
             try
@@ -1000,23 +1119,6 @@ namespace FRPCManager
             {
                 LogMessage($"Error loading local directory: {ex.Message}");
             }
-        }
-
-        private string GetFullPath(TreeNode node)
-        {
-            var path = new Stack<string>();
-            while (node != null)
-            {
-                path.Push(node.Text);
-                node = node.Parent;
-            }
-            return Path.Combine(path.ToArray());
-        }
-
-        private string GetFileType(string extension)
-        {
-            if (string.IsNullOrEmpty(extension)) return "文件";
-            return extension.TrimStart('.').ToUpper() + "文件";
         }
 
         private void FRPCManager_FormClosing(object? sender, FormClosingEventArgs e)
@@ -1220,6 +1322,228 @@ namespace FRPCManager
             }
 
             return connectionPanel;
+        }
+
+        private string GetFileType(string extension)
+        {
+            if (string.IsNullOrEmpty(extension)) return "文件";
+            return extension.TrimStart('.').ToUpper() + "文件";
+        }
+
+        private async void RemoteFileList_DragDrop(object? sender, DragEventArgs e)
+        {
+            try
+            {
+                if (e.Data?.GetDataPresent(typeof(DragDropData)) != true)
+                    return;
+
+                var data = e.Data.GetData(typeof(DragDropData));
+                if (data is not DragDropData dragData)
+                    return;
+
+                if (!dragData.IsLocal)
+                    return; // Don't allow remote-to-remote drops
+
+                var selectedNode = remoteTreeView.SelectedNode;
+                if (selectedNode == null)
+                {
+                    MessageBox.Show("请选择远程目标目录", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                var targetPath = GetFullPath(selectedNode);
+                var fileName = Path.GetFileName(dragData.SourcePath);
+                // Ensure proper path format for remote files
+                var remoteFilePath = targetPath.Replace('\\', '/').TrimEnd('/') + "/" + fileName;
+
+                if (sftpClient?.Exists(remoteFilePath) == true)
+                {
+                    var result = MessageBox.Show(
+                        $"文件 {fileName} 已存在，是否覆盖？",
+                        "文件已存在",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question
+                    );
+
+                    if (result != DialogResult.Yes)
+                        return;
+                }
+
+                try
+                {
+                    AppendLog($"正在上传文件: {fileName} 到 {remoteFilePath}");
+                    await TransferFileWithProgress(dragData.SourcePath, remoteFilePath, true);
+                    AppendLog($"文件上传完成: {fileName}");
+                    
+                    // Refresh the remote file list after successful upload
+                    UpdateRemoteFileList(targetPath);
+                }
+                catch (Exception ex)
+                {
+                    AppendLog($"Error: 文件上传失败: {ex.Message}");
+                    MessageBox.Show($"上传失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"Error: 处理文件拖放时发生错误: {ex.Message}");
+            }
+        }
+
+        private async void LocalFileList_DragDrop(object? sender, DragEventArgs e)
+        {
+            try
+            {
+                if (e.Data?.GetDataPresent(typeof(DragDropData)) != true)
+                    return;
+
+                var data = e.Data.GetData(typeof(DragDropData));
+                if (data is not DragDropData dragData)
+                    return;
+
+                if (dragData.IsLocal)
+                    return; // Don't allow local-to-local drops
+
+                var selectedNode = localDirTree.SelectedNode;
+                if (selectedNode == null)
+                {
+                    MessageBox.Show("请选择本地目标目录", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                var targetPath = GetFullPath(selectedNode);
+                var fileName = Path.GetFileName(dragData.SourcePath);
+                var localFilePath = Path.Combine(targetPath, fileName);
+
+                // Ensure the remote file path is properly formatted
+                var remoteFilePath = dragData.SourcePath.Replace('\\', '/');
+
+                if (File.Exists(localFilePath))
+                {
+                    var result = MessageBox.Show(
+                        $"文件 {fileName} 已存在，是否覆盖？",
+                        "文件已存在",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question
+                    );
+
+                    if (result != DialogResult.Yes)
+                        return;
+                }
+
+                try
+                {
+                    AppendLog($"正在下载文件: {fileName} 到 {localFilePath}");
+                    await TransferFileWithProgress(remoteFilePath, localFilePath, false);
+                    AppendLog($"文件下载完成: {fileName}");
+
+                    // Refresh the local file list
+                    LocalDirTree_AfterSelect(null, new TreeViewEventArgs(selectedNode));
+                }
+                catch (Exception ex)
+                {
+                    AppendLog($"Error: 文件下载失败: {ex.Message}");
+                    MessageBox.Show($"下载失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    
+                    // Clean up incomplete download
+                    if (File.Exists(localFilePath))
+                    {
+                        try
+                        {
+                            File.Delete(localFilePath);
+                        }
+                        catch
+                        {
+                            // Ignore cleanup errors
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"Error: 处理文件拖放时发生错误: {ex.Message}");
+            }
+        }
+
+        private async Task TransferFileWithProgress(string sourcePath, string targetPath, bool isUpload)
+        {
+            if (sftpClient == null || !sftpClient.IsConnected)
+            {
+                throw new InvalidOperationException("SFTP 连接已断开");
+            }
+
+            var fileName = Path.GetFileName(sourcePath);
+            long fileSize;
+            
+            try
+            {
+                fileSize = isUpload ? new FileInfo(sourcePath).Length : sftpClient.Get(sourcePath).Length;
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"无法获取文件信息: {ex.Message}");
+            }
+
+            var transferredBytes = 0L;
+            var lastProgressUpdate = DateTime.Now;
+            var buffer = new byte[8192]; // 8KB buffer
+
+            try
+            {
+                if (isUpload)
+                {
+                    using var sourceStream = File.OpenRead(sourcePath);
+                    using var progressStream = new ProgressStream(sourceStream, (bytesRead) =>
+                    {
+                        transferredBytes += bytesRead;
+                        var now = DateTime.Now;
+                        if ((now - lastProgressUpdate).TotalMilliseconds > 100) // Update every 100ms
+                        {
+                            var progress = (int)((transferredBytes * 100) / fileSize);
+                            this.Invoke((MethodInvoker)delegate
+                            {
+                                AppendLog($"正在上传 {fileName}: {progress}%");
+                            });
+                            lastProgressUpdate = now;
+                        }
+                    });
+
+                    await Task.Run(() => sftpClient.UploadFile(progressStream, targetPath));
+                }
+                else
+                {
+                    using var targetStream = File.Create(targetPath);
+                    using var progressStream = new ProgressStream(targetStream, (bytesWritten) =>
+                    {
+                        transferredBytes += bytesWritten;
+                        var now = DateTime.Now;
+                        if ((now - lastProgressUpdate).TotalMilliseconds > 100) // Update every 100ms
+                        {
+                            var progress = (int)((transferredBytes * 100) / fileSize);
+                            this.Invoke((MethodInvoker)delegate
+                            {
+                                AppendLog($"正在下载 {fileName}: {progress}%");
+                            });
+                            lastProgressUpdate = now;
+                        }
+                    });
+
+                    await Task.Run(() => sftpClient.DownloadFile(sourcePath, progressStream));
+                }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    var remoteFilePath = targetPath.Replace('\\', '/').TrimEnd('/') + "/" + fileName;
+                    fileSize = isUpload ? new FileInfo(sourcePath).Length : sftpClient.Get(sourcePath).Length;
+                }
+                catch (Exception innerEx)
+                {
+                    throw new Exception($"无法获取文件信息: {innerEx.Message}");
+                }
+                throw new Exception($"传输失败: {ex.Message}");
+            }
         }
     }
 }

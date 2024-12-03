@@ -9,7 +9,7 @@ namespace FRPCManager
 {
     internal static class Program
     {
-        public static ILogger Logger { get; private set; }
+        public static ILogger Logger { get; private set; } = null!;
 
         [STAThread]
         static void Main()
