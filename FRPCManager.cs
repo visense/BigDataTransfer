@@ -6,6 +6,8 @@ using System.Windows.Forms;
 using System.Text;
 using Renci.SshNet;
 using Renci.SshNet.Sftp;
+using System.Threading;
+using System.Threading.Tasks;
 
 #nullable enable
 
@@ -18,7 +20,7 @@ namespace FRPCManager
         private readonly Panel hostInfoPanel;
         private readonly TreeView localDirTree;
         private readonly ListView localFileList;
-        private readonly TextBox logTextBox;
+        private readonly RichTextBox logTextBox;
         private readonly TextBox hostTextBox;
         private readonly TextBox usernameTextBox;
         private readonly TextBox passwordTextBox;
@@ -42,7 +44,6 @@ namespace FRPCManager
         {
             try
             {
-                // 初始化所有控件
                 mainTableLayout = new TableLayoutPanel();
                 mainSplitContainer = new SplitContainer();
                 leftSplitContainer = new SplitContainer() { Orientation = Orientation.Horizontal };
@@ -50,7 +51,15 @@ namespace FRPCManager
                 hostInfoPanel = new Panel();
                 localDirTree = new TreeView();
                 localFileList = new ListView();
-                logTextBox = new TextBox();
+                logTextBox = new RichTextBox()
+                {
+                    Multiline = true,
+                    ReadOnly = true,
+                    BackColor = Color.Black,
+                    ForeColor = Color.Gray,
+                    Font = new Font("Consolas", 9F, FontStyle.Regular),
+                    Dock = DockStyle.Fill
+                };
                 hostTextBox = new TextBox();
                 usernameTextBox = new TextBox();
                 passwordTextBox = new TextBox();
@@ -64,16 +73,183 @@ namespace FRPCManager
                 remoteTreeView = new TreeView();
                 remoteFileList = new ListView();
 
-                // 添加窗体事件
                 this.Load += FRPCManager_Load;
-                this.FormClosing += FRPCManager_FormClosing;  
+                this.FormClosing += FRPCManager_FormClosing;
 
                 InitializeUI();
             }
             catch (Exception ex)
             {
-                File.AppendAllText("startup.log", $"构造函数错误: {ex.Message}\n{ex.StackTrace}\n");
+                Program.Logger.Error(ex, "构造函数错误");
                 throw;
+            }
+        }
+
+        private static class LogColors
+        {
+            public static readonly Color Success = Color.FromArgb(144, 238, 144);  // Light green
+            public static readonly Color Error = Color.FromArgb(255, 99, 71);      // Tomato red
+            public static readonly Color Warning = Color.FromArgb(255, 215, 0);    // Golden yellow
+            public static readonly Color Info = Color.FromArgb(255, 165, 0);       // Orange
+            public static readonly Color Default = Color.FromArgb(220, 220, 220);  // Light gray
+        }
+
+        private void AppendLog(string message)
+        {
+            if (logTextBox.InvokeRequired)
+            {
+                logTextBox.Invoke(new Action<string>(AppendLog), message);
+                return;
+            }
+
+            logTextBox.SelectionStart = logTextBox.TextLength;
+            
+            // Determine message color based on content
+            Color messageColor;
+            if (message.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) || 
+                message.Contains("错误", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("失败", StringComparison.OrdinalIgnoreCase))
+            {
+                Program.Logger.Error(message);
+                messageColor = LogColors.Error;
+            }
+            else if (message.StartsWith("Warning:", StringComparison.OrdinalIgnoreCase) || 
+                     message.Contains("警告", StringComparison.OrdinalIgnoreCase))
+            {
+                Program.Logger.Warning(message);
+                messageColor = LogColors.Warning;
+            }
+            else if (message.Contains("success", StringComparison.OrdinalIgnoreCase) || 
+                     message.Contains("成功", StringComparison.OrdinalIgnoreCase) ||
+                     message.Contains("established", StringComparison.OrdinalIgnoreCase) ||
+                     message.Contains("connected", StringComparison.OrdinalIgnoreCase))
+            {
+                Program.Logger.Information(message);
+                messageColor = LogColors.Success;
+            }
+            else if (message.Contains("prepare", StringComparison.OrdinalIgnoreCase) || 
+                     message.Contains("开始", StringComparison.OrdinalIgnoreCase) || 
+                     message.Contains("准备", StringComparison.OrdinalIgnoreCase) ||
+                     message.Contains("visitor added", StringComparison.OrdinalIgnoreCase) ||
+                     message.Contains("establishing", StringComparison.OrdinalIgnoreCase))
+            {
+                Program.Logger.Information(message);
+                messageColor = LogColors.Info;
+            }
+            else
+            {
+                Program.Logger.Information(message);
+                messageColor = LogColors.Default;
+            }
+
+            // Add timestamp with default color
+            var timestamp = DateTime.Now.ToString("HH:mm:ss");
+            logTextBox.SelectionColor = LogColors.Default;
+            logTextBox.AppendText($"[{timestamp}] ");
+            
+            // Add message with determined color
+            logTextBox.SelectionStart = logTextBox.TextLength;
+            logTextBox.SelectionColor = messageColor;
+            logTextBox.AppendText($"{message}{Environment.NewLine}");
+            
+            // Scroll to show latest message
+            logTextBox.ScrollToCaret();
+        }
+
+        private async Task ExecuteCommandWithTimeout(string command, string arguments, int timeoutMs = 5000)
+        {
+            using var process = new Process();
+            using var cts = new CancellationTokenSource(timeoutMs);
+            
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = command,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            process.OutputDataReceived += (s, e) =>
+            {
+                if (!string.IsNullOrEmpty(e.Data))
+                {
+                    this.Invoke((MethodInvoker)delegate
+                    {
+                        Program.Logger.Information(e.Data);
+                        AppendLog(e.Data);
+                    });
+                }
+            };
+
+            process.ErrorDataReceived += (s, e) =>
+            {
+                if (!string.IsNullOrEmpty(e.Data))
+                {
+                    this.Invoke((MethodInvoker)delegate
+                    {
+                        Program.Logger.Error(e.Data);
+                        AppendLog($"Error: {e.Data}");
+                    });
+                }
+            };
+
+            try
+            {
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                await Task.Run(() =>
+                {
+                    if (!process.WaitForExit(timeoutMs))
+                    {
+                        Program.Logger.Warning($"Command execution timed out after {timeoutMs}ms: {command} {arguments}");
+                        process.Kill();
+                        AppendLog($"Warning: Command execution timed out after {timeoutMs}ms");
+                        throw new TimeoutException($"Command timed out after {timeoutMs}ms");
+                    }
+                }, cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                Program.Logger.Warning($"Command execution cancelled: {command} {arguments}");
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                    AppendLog($"Warning: Command execution cancelled");
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.Logger.Error(ex, "Command execution error");
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                }
+                AppendLog($"Error: {ex.Message}");
+            }
+        }
+
+        private async Task RunFrpcProcess()
+        {
+            try
+            {
+                if (frpcProcess != null && !frpcProcess.HasExited)
+                {
+                    Program.Logger.Warning("FRPC进程已在运行");
+                    AppendLog("Warning: FRPC进程已在运行");
+                    return;
+                }
+
+                await ExecuteCommandWithTimeout("frpc.exe", "-c frpc.toml", 5000);
+            }
+            catch (Exception ex)
+            {
+                Program.Logger.Error(ex, "运行FRPC进程时发生错误");
+                AppendLog($"Error: 运行FRPC时发生错误: {ex.Message}");
             }
         }
 
@@ -98,7 +274,7 @@ namespace FRPCManager
             }
             catch (Exception ex)
             {
-                File.AppendAllText("startup.log", $"窗体加载错误: {ex.Message}\n{ex.StackTrace}\n");
+                Program.Logger.Error(ex, "窗体加载错误");
             }
         }
 
@@ -159,15 +335,6 @@ namespace FRPCManager
                 mainSplitContainer.Panel1.Controls.Add(leftSplitContainer);
                 mainSplitContainer.Panel2.Controls.Add(rightSplitContainer);
 
-                // 初始化日志文本框
-                logTextBox.Multiline = true;
-                logTextBox.ScrollBars = ScrollBars.Both;
-                logTextBox.Dock = DockStyle.Fill;
-                logTextBox.ReadOnly = true;
-                logTextBox.BackColor = Color.Black;
-                logTextBox.ForeColor = Color.White;
-                logTextBox.Font = new Font("Consolas", 9F);
-
                 // 添加控件到主布局
                 mainTableLayout.Controls.Add(mainSplitContainer, 0, 1);
                 mainTableLayout.Controls.Add(logTextBox, 0, 2);
@@ -211,7 +378,7 @@ namespace FRPCManager
             }
             catch (Exception ex)
             {
-                File.AppendAllText("startup.log", $"UI初始化错误: {ex.Message}\n{ex.StackTrace}\n");
+                Program.Logger.Error(ex, "UI初始化错误");
                 throw;
             }
         }
@@ -850,19 +1017,6 @@ namespace FRPCManager
         {
             if (string.IsNullOrEmpty(extension)) return "文件";
             return extension.TrimStart('.').ToUpper() + "文件";
-        }
-
-        private void AppendLog(string message)
-        {
-            if (logTextBox.InvokeRequired)
-            {
-                logTextBox.Invoke(new Action(() => AppendLog(message)));
-            }
-            else
-            {
-                logTextBox.AppendText($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
-                logTextBox.ScrollToCaret();
-            }
         }
 
         private void FRPCManager_FormClosing(object? sender, FormClosingEventArgs e)
